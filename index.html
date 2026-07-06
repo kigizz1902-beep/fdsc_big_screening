@@ -22,13 +22,14 @@
       </div>
       <nav class="nav" id="nav">
         <button class="nav-item active" data-view="calendar"><span class="nav-ico">📅</span><span class="nav-label">캘린더</span></button>
+        <button class="nav-item" data-view="minutes"><span class="nav-ico">📝</span><span class="nav-label">회의록</span></button>
         <button class="nav-item" data-view="cinemas"><span class="nav-ico">🎞️</span><span class="nav-label">영화관 리스트</span></button>
-        <button class="nav-item" data-view="ideas"><span class="nav-ico">💡</span><span class="nav-label">상영회 아이디어</span></button>
+        <button class="nav-item" data-view="ideas"><span class="nav-ico">💡</span><span class="nav-label">아이디어(메모)</span></button>
         <button class="nav-item" data-view="accounting"><span class="nav-ico">💰</span><span class="nav-label">회계 시트</span></button>
         <button class="nav-item" data-view="timestamps"><span class="nav-ico">⏱️</span><span class="nav-label">타임스탬프</span></button>
       </nav>
       <div class="sidebar-footer">
-        <button class="btn btn-ghost btn-block" id="backupAllBtn">📦 전체 백업</button>
+        <button class="btn btn-ghost btn-block" id="backupAllBtn">🔄 백업 · 복원</button>
       </div>
     </aside>
 
@@ -44,8 +45,9 @@
     <!-- 하단 탭 (모바일) -->
     <nav class="bottom-nav" id="bottomNav">
       <button class="bn-item active" data-view="calendar"><span>📅</span><em>캘린더</em></button>
+      <button class="bn-item" data-view="minutes"><span>📝</span><em>회의록</em></button>
       <button class="bn-item" data-view="cinemas"><span>🎞️</span><em>영화관</em></button>
-      <button class="bn-item" data-view="ideas"><span>💡</span><em>아이디어</em></button>
+      <button class="bn-item" data-view="ideas"><span>💡</span><em>메모</em></button>
       <button class="bn-item" data-view="accounting"><span>💰</span><em>회계</em></button>
       <button class="bn-item" data-view="timestamps"><span>⏱️</span><em>시간</em></button>
     </nav>
@@ -66,6 +68,9 @@
 
   <!-- 토스트 -->
   <div class="toast" id="toast" hidden></div>
+
+  <!-- 백업 불러오기용 숨김 파일 입력 -->
+  <input type="file" id="importFile" accept=".json,.xlsx" hidden />
 
   <!-- 라이브러리 -->
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>

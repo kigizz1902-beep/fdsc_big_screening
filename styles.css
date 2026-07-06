@@ -83,6 +83,9 @@ input, select, textarea { font-family: inherit; font-size: 15px; }
   gap: 12px;
   padding: 22px 28px 16px;
   flex-wrap: wrap;
+  position: sticky; top: 0;
+  background: var(--bg);
+  z-index: 40;
 }
 .page-title { font-size: 24px; font-weight: 700; }
 .topbar-actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
@@ -142,20 +145,21 @@ input, select, textarea { font-family: inherit; font-size: 15px; }
 .tag-soft { color: var(--text); background: var(--bg); border: 1px solid var(--line-strong); font-weight: 500; }
 
 /* ===== 캘린더 ===== */
-.cal-toolbar { display: flex; align-items: center; gap: 10px; margin-bottom: 14px; }
+.cal-toolbar { display: flex; align-items: center; gap: 10px; margin-bottom: 14px; flex-wrap: wrap; }
 .cal-month { font-size: 19px; font-weight: 700; min-width: 128px; text-align: center; }
 .cal-nav-btn { padding: 6px 13px; font-size: 16px; }
 .cal-legend { display: flex; gap: 14px; margin-left: auto; flex-wrap: wrap; }
 .cal-legend span { display: inline-flex; align-items: center; gap: 6px; font-size: 12.5px; color: var(--muted); }
 
 .calendar { background: var(--card); border: 1px solid var(--line); border-radius: var(--radius); overflow: hidden; }
-.cal-weekdays { display: grid; grid-template-columns: repeat(7, 1fr); border-bottom: 1px solid var(--line); }
+.cal-weekdays { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); border-bottom: 1px solid var(--line); }
 .cal-weekdays div { padding: 10px 8px; text-align: center; font-size: 12.5px; font-weight: 700; color: var(--muted); }
 .cal-weekdays div:first-child { color: #e5484d; }
 .cal-weekdays div:last-child { color: var(--p5); }
 
-.cal-grid { display: grid; grid-template-columns: repeat(7, 1fr); }
+.cal-grid { display: grid; grid-template-columns: repeat(7, minmax(0, 1fr)); }
 .cal-cell {
+  min-width: 0;
   min-height: 108px;
   border-right: 1px solid var(--line);
   border-bottom: 1px solid var(--line);
@@ -185,7 +189,7 @@ input, select, textarea { font-family: inherit; font-size: 15px; }
   padding: 2px 7px; border-radius: 5px;
   color: #fff;
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
-  border: none; text-align: left; width: 100%;
+  border: none; text-align: left; width: 100%; max-width: 100%; min-width: 0;
 }
 .cal-dots { display: flex; gap: 3px; margin-top: auto; flex-wrap: wrap; }
 .cal-dot { width: 6px; height: 6px; border-radius: 50%; }
@@ -278,6 +282,55 @@ table.data tr:last-child td { border-bottom: none; }
 .ts-bar { height: 7px; background: var(--bg); border-radius: 999px; margin-top: 8px; overflow: hidden; }
 .ts-bar-fill { height: 100%; border-radius: 999px; }
 
+/* ===== 이번 주 일정 ===== */
+.week-section { margin-top: 20px; }
+.week-section h3 { font-size: 15px; margin-bottom: 10px; display: flex; align-items: center; gap: 8px; }
+.week-list { display: flex; flex-direction: column; gap: 8px; }
+.week-item {
+  display: flex; align-items: center; gap: 12px;
+  padding: 12px 14px; width: 100%;
+  background: var(--card); border: 1px solid var(--line); border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  font-size: 14px; text-align: left;
+  transition: box-shadow .15s;
+}
+.week-item:hover { box-shadow: var(--shadow-lg); }
+.week-date { font-size: 12.5px; color: var(--muted); width: 108px; flex-shrink: 0; }
+.week-item.today .week-date { color: var(--text); font-weight: 700; }
+.week-name { font-weight: 600; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.week-sub { font-size: 12.5px; color: var(--muted); flex-shrink: 0; }
+
+/* ===== 칩(복수 날짜·게스트) ===== */
+.chips { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+.chip-item {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 5px 11px; border-radius: 999px;
+  background: var(--bg); border: 1px solid var(--line-strong);
+  font-size: 12.5px; font-weight: 600;
+}
+.chip-item button { border: none; background: none; color: var(--muted); font-size: 12px; padding: 0 0 0 2px; line-height: 1; }
+.chip-item button:hover { color: #e5484d; }
+
+/* ===== 회의록 ===== */
+.minute-card { padding: 16px 18px; margin-bottom: 10px; cursor: pointer; transition: box-shadow .15s; }
+.minute-card:hover { box-shadow: var(--shadow-lg); }
+.minute-head { display: flex; justify-content: space-between; gap: 10px; align-items: flex-start; }
+.minute-title { font-weight: 700; font-size: 15.5px; }
+.minute-date { font-size: 12.5px; color: var(--muted); margin-top: 3px; }
+.minute-people { display: flex; gap: 5px; flex-wrap: wrap; margin: 10px 0 0; }
+.minute-preview {
+  font-size: 13px; color: #4a4247; margin-top: 8px;
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+}
+.minute-foot { display: flex; gap: 6px; margin-top: 12px; flex-wrap: wrap; }
+
+/* ===== 백업 모달 ===== */
+.stack { display: flex; flex-direction: column; gap: 10px; padding: 4px 0 8px; }
+.stack .btn { justify-content: flex-start; }
+
+/* 핀 고정 카드 */
+.idea-card.pinned { border-color: var(--p6); box-shadow: 0 1px 3px rgba(254,165,1,.18), 0 4px 16px rgba(24,15,20,.05); }
+
 /* ===== 폼 ===== */
 .field { margin-bottom: 15px; }
 .field label { display: block; font-size: 13px; font-weight: 500; margin-bottom: 6px; }
@@ -294,6 +347,19 @@ table.data tr:last-child td { border-bottom: none; }
 .field-row { display: flex; gap: 12px; }
 .field-row .field { flex: 1; }
 .hint { font-size: 12px; color: var(--muted); margin-top: 5px; }
+
+/* 회계 — 단가표 힌트 / 금액 자동계산 박스 */
+.acc-hint {
+  font-size: 12px; line-height: 1.6; color: #8a6d00;
+  background: #fff8e6; border: 1px solid #ffe6a1;
+  border-radius: var(--radius-sm); padding: 9px 12px; margin: 0 0 15px;
+}
+.amount-box {
+  background: var(--bg); border-radius: var(--radius-sm);
+  padding: 11px 14px; margin-bottom: 15px;
+}
+.amount-box label { display: block; font-size: 13px; font-weight: 500; margin-bottom: 3px; }
+.amount-display { font-size: 22px; font-weight: 700; color: var(--text); }
 
 .pill-select { display: flex; flex-wrap: wrap; gap: 7px; }
 .pill {
