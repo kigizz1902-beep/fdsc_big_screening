@@ -75,6 +75,7 @@ input, select, textarea { font-family: inherit; font-size: 15px; }
 .nav-ico { font-size: 17px; }
 
 .sidebar-footer { padding-top: 14px; border-top: 1px solid var(--line); }
+.sync-status { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--muted); padding: 0 4px 10px; }
 
 .main { flex: 1; min-width: 0; display: flex; flex-direction: column; }
 
@@ -222,19 +223,23 @@ input, select, textarea { font-family: inherit; font-size: 15px; }
 .cinema-tags { display: flex; align-items: center; gap: 8px; flex-shrink: 0; flex-wrap: wrap; justify-content: flex-end; }
 .row-actions { display: flex; gap: 4px; flex-shrink: 0; }
 
-/* ===== 아이디어 (메이슨리) ===== */
-.idea-grid { columns: 3 260px; column-gap: 16px; }
+/* ===== 아이디어 (정렬 그리드 — 행 기준 좌→우, 카드 상단 정렬) ===== */
+.idea-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(250px, 1fr));
+  gap: 16px; /* 같은 행의 카드는 높이가 자동으로 맞춰짐 */
+}
 .idea-card {
-  break-inside: avoid; margin-bottom: 16px;
   background: var(--card); border: 1px solid var(--line); border-radius: var(--radius);
   box-shadow: var(--shadow); overflow: hidden;
   border-top: 4px solid var(--line);
+  display: flex; flex-direction: column;
 }
-.idea-card img { width: 100%; display: block; background: var(--bg); }
-.idea-body { padding: 14px 15px; }
+.idea-card img { width: 100%; display: block; background: var(--bg); max-height: 220px; object-fit: cover; }
+.idea-body { padding: 14px 15px; display: flex; flex-direction: column; flex: 1; }
 .idea-title { font-weight: 700; font-size: 15.5px; margin-bottom: 6px; }
 .idea-content { font-size: 13.5px; color: #4a4247; white-space: pre-wrap; word-break: break-word; }
-.idea-foot { display: flex; align-items: center; gap: 8px; margin-top: 12px; flex-wrap: wrap; }
+.idea-foot { display: flex; align-items: center; gap: 8px; margin-top: auto; padding-top: 12px; flex-wrap: wrap; }
 .idea-author { font-size: 12px; color: var(--muted); margin-left: auto; }
 .like-btn {
   display: inline-flex; align-items: center; gap: 5px;
@@ -414,7 +419,7 @@ table.data tr:last-child td { border-bottom: none; }
 /* ===== 반응형 ===== */
 @media (max-width: 1024px) {
   .charts { grid-template-columns: 1fr; }
-  .idea-grid { columns: 2 220px; }
+  .idea-grid { grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); }
 }
 
 @media (max-width: 720px) {
@@ -442,7 +447,7 @@ table.data tr:last-child td { border-bottom: none; }
   .view { padding: 4px 16px 40px; }
 
   .summary-cards { grid-template-columns: 1fr; }
-  .idea-grid { columns: 1; }
+  .idea-grid { grid-template-columns: 1fr; }
   .cal-cell { min-height: 78px; padding: 5px 5px; }
   .cal-date { width: 20px; height: 20px; font-size: 11px; }
   .cal-ev { font-size: 10px; padding: 1px 5px; }

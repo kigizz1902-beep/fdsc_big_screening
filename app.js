@@ -1,16 +1,39 @@
 /* =========================================================
-   빅활동: 민활기 다큐 상영회 — 협업 웹앱 v2
-   localStorage 기반 경량 SPA
+   빅활동: 민활기 다큐 상영회 — 협업 웹앱 v3
+   localStorage + Supabase 클라우드 동기화
    ========================================================= */
+
+/* ---------- 클라우드 설정 (Supabase) ----------
+   아래 두 값을 채우면 모든 기기·팀원이 같은 데이터를 실시간 공유합니다.
+   비워두면 기존처럼 이 브라우저에만 저장됩니다(로컬 모드).
+
+   설정 방법:
+   1. https://supabase.com 무료 가입 → New Project 생성
+   2. 프로젝트 대시보드 → SQL Editor에서 아래 SQL 실행:
+
+      create table if not exists bigact (
+        id text primary key,
+        kind text not null,
+        data jsonb not null,
+        updated_at timestamptz default now()
+      );
+      alter table bigact enable row level security;
+      create policy "team access" on bigact for all using (true) with check (true);
+
+   3. Settings → API 에서 Project URL과 anon public 키를 복사해 아래에 붙여넣기
+   4. 저장 후 Vercel에 다시 배포
+------------------------------------------------ */
+const SUPABASE_URL = 'https://ytgermhcagfjnoxinvnd.supabase.co';
+const SUPABASE_KEY = 'sb_publishable_65IzteQ16sDtOF1OxmpPbg_XQqUYBTc';
 
 /* ---------- 상수 ---------- */
 const MEMBERS = [
-  { name: '도은', color: '#fece00' },
-  { name: '가현', color: '#fea1cd' },
-  { name: 'FDSC', color: '#ff7300' },
-  { name: '윤서', color: '#31cc66' },
-  { name: '서린', color: '#00a3fe' },
-  { name: '설향', color: '#fea501' },
+  { name: '김도은', color: '#fece00' },
+  { name: '성솔푸른', color: '#ff7300' },
+  { name: '송윤서', color: '#31cc66' },
+  { name: '오가현', color: '#fea1cd' },
+  { name: '정설향', color: '#fea501' },
+  { name: '채서린', color: '#00a3fe' },
 ];
 const MEMBER_COLOR = Object.fromEntries(MEMBERS.map(m => [m.name, m.color]));
 
@@ -155,7 +178,12 @@ function seedDB(db) {
 }
 /* 구버전 데이터 자동 이관 — 멤버명·회계 구분·영화관 복수날짜 등 */
 function migrateDB(db) {
-  const rename = (s) => (s === '상아' || s === '추가인원') ? 'FDSC' : s;
+  /* 옛 이름(모든 세대) → 현재 실명 */
+  const RENAME_MAP = {
+    '도은': '김도은', '가현': '오가현', '윤서': '송윤서', '서린': '채서린', '설향': '정설향',
+    '상아': '성솔푸른', '추가인원': '성솔푸른', 'FDSC': '성솔푸른',
+  };
+  const rename = (s) => RENAME_MAP[s] || s;
 
   (db.timestamps || []).forEach(t => { t.name = rename(t.name); });
   (db.ideas || []).forEach(i => {
@@ -226,6 +254,193 @@ function saveDB() {
     }
     console.error(e);
   }
+  schedulePush(); // 클라우드 모드면 변경분 업로드
+}
+
+/* =========================================================
+   클라우드 동기화 (Supabase REST)
+   - 항목(이벤트/영화관/…) 하나가 서버의 행 하나 → 팀원 간 동시 편집에도 안전
+   - 저장 시 변경분만 업로드, 30초마다 + 화면 복귀 시 서버에서 갱신
+   ========================================================= */
+const CLOUD_KINDS = [
+  ['events', 'event'], ['cinemas', 'cinema'], ['ideas', 'idea'],
+  ['accounting', 'acc'], ['timestamps', 'ts'], ['minutes', 'minute'],
+];
+let lastCloud = null;   // 마지막으로 서버와 일치했던 상태 (id → row JSON)
+let pushTimer = null;
+let pulling = false;
+
+function cloudEnabled() { return !!(SUPABASE_URL && SUPABASE_KEY); }
+
+function cloudHeaders() {
+  return {
+    'apikey': SUPABASE_KEY,
+    'Authorization': `Bearer ${SUPABASE_KEY}`,
+    'Content-Type': 'application/json',
+  };
+}
+
+/* DB 객체 → 서버 행 목록 */
+function dbToRows(db) {
+  const rows = [];
+  CLOUD_KINDS.forEach(([coll, kind]) => {
+    (db[coll] || []).forEach(item => rows.push({ id: item.id, kind, data: item }));
+  });
+  rows.push({ id: '__settings__', kind: 'settings', data: { budget: db.budget || 0 } });
+  return rows;
+}
+
+/* 서버 행 목록 → DB 객체 */
+function rowsToDb(rows) {
+  const db = structuredClone(DEFAULT_DB);
+  db.seeded = true; // 클라우드가 비어 보여도 마일스톤 중복 생성 방지
+  const kindToColl = Object.fromEntries(CLOUD_KINDS.map(([c, k]) => [k, c]));
+  rows.forEach(r => {
+    if (r.kind === 'settings') { db.budget = Number(r.data?.budget || 0); return; }
+    const coll = kindToColl[r.kind];
+    if (coll && r.data && r.data.id) db[coll].push(r.data);
+  });
+  return db;
+}
+
+function rowMap(rows) {
+  const m = {};
+  rows.forEach(r => { m[r.id] = JSON.stringify({ kind: r.kind, data: r.data }); });
+  return m;
+}
+
+function setSyncStatus(state, msg) {
+  const elx = $('#syncStatus');
+  if (!elx) return;
+  const dot = { on: '#31cc66', off: '#9a8f95', err: '#ff7300', sync: '#00a3fe' }[state] || '#9a8f95';
+  elx.innerHTML = `<span class="tag-dot" style="background:${dot}"></span> ${esc(msg)}`;
+}
+
+/* 서버에서 전체 데이터 가져오기 */
+async function cloudFetchRows() {
+  const res = await fetch(`${SUPABASE_URL}/rest/v1/bigact?select=id,kind,data`, { headers: cloudHeaders() });
+  if (!res.ok) throw new Error(`fetch ${res.status}`);
+  return res.json();
+}
+
+/* 변경 감지용 스탬프 (행 개수 + 최신 수정시각) — 응답이 수백 바이트라 전송량 절약
+   추가/수정은 updated_at, 삭제는 행 개수로 잡힘 */
+async function cloudCheckStamp() {
+  const res = await fetch(`${SUPABASE_URL}/rest/v1/bigact?select=updated_at&order=updated_at.desc&limit=1`, {
+    headers: { ...cloudHeaders(), 'Prefer': 'count=exact' },
+  });
+  if (!res.ok) throw new Error(`stamp ${res.status}`);
+  const rows = await res.json();
+  const count = (res.headers.get('content-range') || '').split('/')[1] || '?';
+  return `${count}|${rows[0]?.updated_at || ''}`;
+}
+let lastStamp = null;
+
+async function cloudUpsert(rows) {
+  if (!rows.length) return;
+  const res = await fetch(`${SUPABASE_URL}/rest/v1/bigact`, {
+    method: 'POST',
+    headers: { ...cloudHeaders(), 'Prefer': 'resolution=merge-duplicates' },
+    body: JSON.stringify(rows.map(r => ({ ...r, updated_at: new Date().toISOString() }))),
+  });
+  if (!res.ok) throw new Error(`upsert ${res.status}`);
+}
+
+async function cloudDelete(ids) {
+  if (!ids.length) return;
+  const list = ids.map(id => `"${id.replace(/"/g, '')}"`).join(',');
+  const res = await fetch(`${SUPABASE_URL}/rest/v1/bigact?id=in.(${encodeURIComponent(list)})`, {
+    method: 'DELETE', headers: cloudHeaders(),
+  });
+  if (!res.ok) throw new Error(`delete ${res.status}`);
+}
+
+/* 변경분 업로드 (디바운스) */
+function schedulePush() {
+  if (!cloudEnabled() || lastCloud === null) return; // 최초 동기화 전이면 보류
+  clearTimeout(pushTimer);
+  pushTimer = setTimeout(pushDiff, 600);
+}
+
+async function pushDiff() {
+  if (!cloudEnabled() || lastCloud === null) return;
+  const rows = dbToRows(DB);
+  const cur = rowMap(rows);
+  const upserts = rows.filter(r => lastCloud[r.id] !== cur[r.id]);
+  const deletes = Object.keys(lastCloud).filter(id => !(id in cur));
+  if (!upserts.length && !deletes.length) return;
+  try {
+    setSyncStatus('sync', '동기화 중…');
+    await cloudUpsert(upserts);
+    await cloudDelete(deletes);
+    lastCloud = cur;
+    lastStamp = null; // 내가 올린 변경 — 다음 폴링에서 한 번 전체 대조
+    setSyncStatus('on', '클라우드 연결됨');
+  } catch (e) {
+    console.error('cloud push 실패', e);
+    setSyncStatus('err', '연결 안 됨 · 이 기기에만 저장 중');
+  }
+}
+
+/* 서버 → 로컬 갱신. 모달 열려 있으면(입력 중) 건너뜀 */
+async function pullCloud({ silent } = { silent: true }) {
+  if (!cloudEnabled() || pulling) return;
+  pulling = true;
+  try {
+    /* 평상시엔 가벼운 스탬프만 확인하고, 변한 게 없으면 전체 다운로드 생략 */
+    let stamp = null;
+    if (lastCloud !== null) {
+      stamp = await cloudCheckStamp();
+      if (stamp === lastStamp) return;
+    }
+    const rows = await cloudFetchRows();
+    const serverMap = rowMap(rows);
+
+    if (lastCloud === null) {
+      /* 최초 동기화: 서버 데이터와 로컬 데이터를 id 기준으로 합침
+         (같은 id는 서버 우선, 이 기기에만 있는 항목은 서버로 업로드) */
+      const localRows = dbToRows(DB);
+      const localOnly = localRows.filter(r => !(r.id in serverMap) && r.id !== '__settings__');
+      const merged = rowsToDb(rows);
+      localOnly.forEach(r => {
+        const coll = CLOUD_KINDS.find(([, k]) => k === r.kind)?.[0];
+        if (coll) merged[coll].push(r.data);
+      });
+      if (!rows.some(r => r.id === '__settings__')) merged.budget = DB.budget;
+      DB = migrateDB(merged);
+      localStorage.setItem(DB_KEY, JSON.stringify(DB));
+      lastCloud = serverMap;
+      if (localOnly.length || !rows.some(r => r.id === '__settings__')) await pushDiff();
+      lastStamp = await cloudCheckStamp().catch(() => null);
+      setSyncStatus('on', '클라우드 연결됨');
+      rerender();
+    } else if (JSON.stringify(serverMap) !== JSON.stringify(lastCloud)) {
+      /* 다른 팀원의 변경 반영 — 입력 중(모달 열림)이면 다음 주기로 미룸 (스탬프 기록도 미룸) */
+      if (!$('#modalRoot').hidden) return;
+      DB = migrateDB(rowsToDb(rows));
+      localStorage.setItem(DB_KEY, JSON.stringify(DB));
+      lastCloud = serverMap;
+      lastStamp = stamp;
+      rerender();
+      if (!silent) toast('다른 팀원의 변경사항을 불러왔어요');
+    } else {
+      lastStamp = stamp; // 내용 동일 — 스탬프만 갱신
+    }
+  } catch (e) {
+    console.error('cloud pull 실패', e);
+    setSyncStatus('err', '연결 안 됨 · 이 기기에만 저장 중');
+  } finally {
+    pulling = false;
+  }
+}
+
+function initCloud() {
+  if (!cloudEnabled()) { setSyncStatus('off', '로컬 모드 (기기별 저장)'); return; }
+  setSyncStatus('sync', '연결 중…');
+  pullCloud();
+  setInterval(() => pullCloud(), 30000);            // 30초마다 갱신
+  window.addEventListener('focus', () => pullCloud());
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) pullCloud(); });
 }
 
 /* ---------- 유틸 ---------- */
@@ -804,7 +1019,7 @@ function openCinemaModal(existing) {
         <div class="chips" id="dateChips"></div>
       </div>
       <div class="field-row">
-        <div class="field"><label>담당자</label><input type="text" name="manager" placeholder="예) 도은" value="${esc(c.manager)}" /></div>
+        <div class="field"><label>담당자</label><input type="text" name="manager" placeholder="예) 김도은" value="${esc(c.manager)}" /></div>
         <div class="field"><label>연락처</label><input type="text" name="contact" placeholder="전화번호" value="${esc(c.contact)}" /></div>
       </div>
       <div class="field"><label>메모</label><textarea name="memo" placeholder="통화 내용, 특이사항">${esc(c.memo)}</textarea></div>
@@ -1830,7 +2045,11 @@ function handleImportFile(file) {
 
 /* 백업 · 복원 통합 모달 */
 function openDataModal() {
+  const cloudInfo = cloudEnabled()
+    ? '<p class="hint" style="margin-bottom:4px">☁️ <b>클라우드 동기화 사용 중</b> — 모든 기기·팀원이 같은 데이터를 봅니다. 백업 파일은 만약을 위한 보관용입니다.</p>'
+    : '<p class="hint" style="margin-bottom:4px">💻 <b>로컬 모드</b> — 데이터가 이 브라우저에만 저장됩니다. 다른 기기·팀원과 공유하려면 백업 파일을 주고받거나, app.js에 Supabase 키를 설정해 클라우드 동기화를 켜세요.</p>';
   const body = el(`<div class="stack">
+    ${cloudInfo}
     <button class="btn btn-block" id="dmJson">💾 백업 파일 저장 (.json) — 이미지 포함 무손실</button>
     <button class="btn btn-block" id="dmXlsx">📦 전체 엑셀 백업 (.xlsx) — 열람·공유용</button>
     <button class="btn btn-block btn-primary" id="dmImport">📥 백업 불러오기 (.json / .xlsx)</button>
@@ -1869,6 +2088,7 @@ function init() {
   if (idx >= 0) calIndex = idx;
 
   navigate('calendar');
+  initCloud();
 }
 
 document.addEventListener('DOMContentLoaded', init);
