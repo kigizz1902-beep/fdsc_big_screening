@@ -55,6 +55,16 @@ const CINEMA_STATUS = {
   '상영일정': '#a78bfa',
 };
 
+/* 대관 규모 — 색상 및 표시 라벨 */
+const CINEMA_SCALE = {
+  '소규모': '#31cc66',
+  '대규모': '#ff7300',
+};
+const CINEMA_SCALE_LABEL = {
+  '소규모': '소규모 (50인 이하)',
+  '대규모': '대규모 (50인 이상)',
+};
+
 /* 회의록 캘린더 반영 색상 (회의 날짜 / 다음 회의 예정) */
 const MINUTE_COLOR = '#fece00';
 /* 작업기록 색상 */
@@ -144,38 +154,35 @@ const MONTHS = [ // 2026년 7~12월
   { y: 2026, m: 6 }, { y: 2026, m: 7 }, { y: 2026, m: 8 }, { y: 2026, m: 9 }, { y: 2026, m: 10 }, { y: 2026, m: 11 },
 ];
 
-const SEED_EVENTS = [
-  { name: '킥오프 미팅', sector: '미팅', date: '2026-07-06', memo: '프로젝트 시작 · 역할 분담' },
-  { name: '중간점검 워크숍', sector: '미팅', date: '2026-08-14', memo: '진행상황 점검' },
-  { name: '결과물 완료', sector: '기타', date: '2026-09-04', memo: '결과물 마감' },
-  { name: '활동 회고 및 아카이브', sector: '기타', date: '2026-09-07', memo: '회고 미팅' },
-];
-
 /* ---------- 저장소 ---------- */
 const DB_KEY = 'bigact_screening_db_v1';
 const DEFAULT_DB = {
   events: [], cinemas: [], ideas: [], accounting: [], timestamps: [], minutes: [],
-  budget: 0, seeded: false,
+  budget: 0,
 };
 
 function loadDB() {
   try {
     const raw = localStorage.getItem(DB_KEY);
-    if (!raw) return migrateDB(seedDB(structuredClone(DEFAULT_DB)));
+    if (!raw) return migrateDB(structuredClone(DEFAULT_DB));
     const parsed = JSON.parse(raw);
     return migrateDB({ ...structuredClone(DEFAULT_DB), ...parsed });
   } catch (e) {
     console.error('DB load 실패', e);
-    return migrateDB(seedDB(structuredClone(DEFAULT_DB)));
+    return migrateDB(structuredClone(DEFAULT_DB));
   }
 }
-function seedDB(db) {
-  if (!db.seeded) {
-    db.events = SEED_EVENTS.map(e => ({ id: uid(), time: '', dateEnd: '', ...e }));
-    db.seeded = true;
+/* 추천(하트) 이관 — 구버전의 숫자 카운트를 '누른 사람 목록'으로 승계.
+   likedBy가 없으면 기존 개수만큼 익명 자리(legacy)를 채워 총계를 보존한다. */
+function seedLikes(item) {
+  if (!Array.isArray(item.likedBy)) {
+    const n = Number(item.likes) || 0;
+    item.likedBy = Array.from({ length: n }, (_, k) => 'legacy-' + k);
   }
-  return db;
+  item.likes = item.likedBy.length;
+  delete item.liked;
 }
+
 /* 구버전 데이터 자동 이관 — 멤버명·회계 구분·영화관 복수날짜 등 */
 function migrateDB(db) {
   /* 옛 이름(모든 세대) → 현재 실명 */
@@ -189,13 +196,19 @@ function migrateDB(db) {
   (db.ideas || []).forEach(i => {
     i.author = rename(i.author);
     if (i.pinned === undefined) i.pinned = false;
-    if (i.likes === undefined) i.likes = 0;
+    seedLikes(i);
   });
   (db.cinemas || []).forEach(c => {
     c.manager = rename(c.manager || '');
     // date(단일) → dates(복수) 이관
     if (!Array.isArray(c.dates)) c.dates = c.date ? [c.date] : [];
     delete c.date;
+    // 신규 필드 기본값
+    if (c.site === undefined) c.site = '';
+    if (c.scale === undefined) c.scale = '';
+    if (c.fee === undefined) c.fee = '';
+    if (c.method === undefined) c.method = '';
+    seedLikes(c);
   });
   (db.events || []).forEach(e => {
     if (e.dateEnd === undefined) e.dateEnd = '';
@@ -293,7 +306,6 @@ function dbToRows(db) {
 /* 서버 행 목록 → DB 객체 */
 function rowsToDb(rows) {
   const db = structuredClone(DEFAULT_DB);
-  db.seeded = true; // 클라우드가 비어 보여도 마일스톤 중복 생성 방지
   const kindToColl = Object.fromEntries(CLOUD_KINDS.map(([c, k]) => [k, c]));
   rows.forEach(r => {
     if (r.kind === 'settings') { db.budget = Number(r.data?.budget || 0); return; }
@@ -407,7 +419,9 @@ async function pullCloud({ silent } = { silent: true }) {
         if (coll) merged[coll].push(r.data);
       });
       if (!rows.some(r => r.id === '__settings__')) merged.budget = DB.budget;
-      DB = migrateDB(merged);
+      const nextDb = migrateDB(merged);
+      mergeLikedBy(DB, nextDb); // 이 기기에서 누른 추천 보존
+      DB = nextDb;
       localStorage.setItem(DB_KEY, JSON.stringify(DB));
       lastCloud = serverMap;
       if (localOnly.length || !rows.some(r => r.id === '__settings__')) await pushDiff();
@@ -417,7 +431,9 @@ async function pullCloud({ silent } = { silent: true }) {
     } else if (JSON.stringify(serverMap) !== JSON.stringify(lastCloud)) {
       /* 다른 팀원의 변경 반영 — 입력 중(모달 열림)이면 다음 주기로 미룸 (스탬프 기록도 미룸) */
       if (!$('#modalRoot').hidden) return;
-      DB = migrateDB(rowsToDb(rows));
+      const nextDb = migrateDB(rowsToDb(rows));
+      mergeLikedBy(DB, nextDb); // 이 기기에서 누른 추천 보존
+      DB = nextDb;
       localStorage.setItem(DB_KEY, JSON.stringify(DB));
       lastCloud = serverMap;
       lastStamp = stamp;
@@ -451,6 +467,12 @@ function esc(s) {
   return String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 }
 function nl2br(s) { return esc(s).replace(/\n/g, '<br>'); }
+/* 사이트 URL 정규화 — http(s) 없으면 https:// 붙임 */
+function normalizeUrl(u) {
+  u = String(u || '').trim();
+  if (!u) return '';
+  return /^https?:\/\//i.test(u) ? u : 'https://' + u;
+}
 function dateToStr(d) { return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`; }
 function todayStr() { return dateToStr(new Date()); }
 function pad(n) { return String(n).padStart(2, '0'); }
@@ -505,6 +527,41 @@ function toast(msg) {
 }
 
 let DB = loadDB();
+
+/* ---------- 추천(하트) — 항목마다 '누른 사람(기기) 목록'을 저장 ----------
+   개수 = 목록 길이. 여러 사람이 각자 누르면 합산되고,
+   같은 사람이 여러 번 눌러도(새로고침·중복 클릭·동기화 반영 포함) 목록에
+   한 번만 들어가므로 절대 중복 집계되지 않습니다. 취소도 자기 것만 정확히 제거. */
+const DEVICE_KEY = 'bigact_device_id_v1';
+function deviceId() {
+  let id = localStorage.getItem(DEVICE_KEY);
+  if (!id) { id = 'dev-' + Math.random().toString(36).slice(2, 10) + Date.now().toString(36).slice(-4); localStorage.setItem(DEVICE_KEY, id); }
+  return id;
+}
+function likeCount(item) { return (item.likedBy || []).length; }
+function hasLiked(item) { return (item.likedBy || []).includes(deviceId()); }
+function toggleLike(item) {
+  const me = deviceId();
+  const set = new Set(item.likedBy || []);
+  if (set.has(me)) set.delete(me); else set.add(me);
+  item.likedBy = [...set];
+  item.likes = item.likedBy.length; // 내보내기·표시용 캐시
+  saveDB(); rerender();
+}
+/* 서버 데이터를 받아올 때 추천 목록을 '합집합'으로 병합 — 두 사람이 같은 항목을
+   비슷한 시각에 추천해도 서로의 표가 사라지지 않도록 보존한다(추천은 누적 우선). */
+function mergeLikedBy(prevDb, nextDb) {
+  ['cinemas', 'ideas'].forEach(coll => {
+    const prevById = {};
+    (prevDb[coll] || []).forEach(x => { prevById[x.id] = x; });
+    (nextDb[coll] || []).forEach(item => {
+      const prev = prevById[item.id];
+      if (!prev || !Array.isArray(prev.likedBy)) return;
+      item.likedBy = [...new Set([...(item.likedBy || []), ...prev.likedBy])];
+      item.likes = item.likedBy.length;
+    });
+  });
+}
 
 /* ---------- 모달 ---------- */
 let modalOnClose = null;
@@ -928,6 +985,7 @@ function openEventDetail(e) {
    F2. 영화관 리스트
    ========================================================= */
 let cinemaFilter = '전체';
+let cinemaScaleFilter = '전체';
 
 function renderCinemas() {
   addTopbarAction(mkBtn('⬇ 엑셀', 'btn-sm', () => exportCinemas()));
@@ -935,6 +993,7 @@ function renderCinemas() {
 
   const view = $('#view');
 
+  // 상태 필터
   const filterBar = el('<div class="filter-bar"></div>');
   ['전체', ...Object.keys(CINEMA_STATUS)].forEach(s => {
     const chip = el(`<button class="chip ${cinemaFilter === s ? 'active' : ''}">${s}</button>`);
@@ -943,14 +1002,30 @@ function renderCinemas() {
   });
   view.appendChild(filterBar);
 
-  const list = DB.cinemas.filter(c => cinemaFilter === '전체' || c.status === cinemaFilter);
+  // 대관 규모 필터 — 소규모 / 대규모로 분류해서 보기
+  const scaleBar = el('<div class="filter-bar"></div>');
+  ['전체', ...Object.keys(CINEMA_SCALE)].forEach(s => {
+    const label = s === '전체' ? '전체 규모' : CINEMA_SCALE_LABEL[s];
+    const chip = el(`<button class="chip ${cinemaScaleFilter === s ? 'active' : ''}">${esc(label)}</button>`);
+    chip.addEventListener('click', () => { cinemaScaleFilter = s; rerender(); });
+    scaleBar.appendChild(chip);
+  });
+  view.appendChild(scaleBar);
+
+  const list = DB.cinemas.filter(c =>
+    (cinemaFilter === '전체' || c.status === cinemaFilter) &&
+    (cinemaScaleFilter === '전체' || c.scale === cinemaScaleFilter)
+  );
   if (!list.length) {
-    view.appendChild(el(`<div class="empty"><span class="empty-emoji">🎞️</span>${DB.cinemas.length ? '해당 상태의 영화관이 없어요.' : '아직 등록된 영화관이 없어요.<br>우측 상단 <b>+ 영화관</b>으로 추가해보세요.'}</div>`));
+    view.appendChild(el(`<div class="empty"><span class="empty-emoji">🎞️</span>${DB.cinemas.length ? '해당 조건의 영화관이 없어요.' : '아직 등록된 영화관이 없어요.<br>우측 상단 <b>+ 영화관</b>으로 추가해보세요.'}</div>`));
     return;
   }
 
   REGIONS.forEach(region => {
-    const inRegion = list.filter(c => c.region === region);
+    // 같은 지역 안에서는 하트(추천) 수가 높은 순으로 정렬
+    const inRegion = list
+      .filter(c => c.region === region)
+      .sort((a, b) => likeCount(b) - likeCount(a));
     if (!inRegion.length) return;
     const group = el(`<div class="region-group">
       <div class="region-head"><h3>${region}</h3><span class="region-count">${inRegion.length}</span></div>
@@ -963,7 +1038,9 @@ function renderCinemas() {
 
 function cinemaItem(c) {
   const color = CINEMA_STATUS[c.status] || '#9a8f95';
+  const scaleColor = CINEMA_SCALE[c.scale];
   const datesTxt = (c.dates || []).map(fmtDate).join(', ');
+  const siteUrl = normalizeUrl(c.site);
   const item = el(`<div class="cinema-item">
     <div class="cinema-main">
       <div class="cinema-name">${esc(c.name)}</div>
@@ -971,18 +1048,26 @@ function cinemaItem(c) {
         <span>📍 ${esc(c.location)}</span>
         ${c.manager ? `<span>👤 ${esc(c.manager)}</span>` : ''}
         ${c.contact ? `<span>📞 ${esc(c.contact)}</span>` : ''}
+        ${siteUrl ? `<span>🔗 <a href="${esc(siteUrl)}" target="_blank" rel="noopener">사이트</a></span>` : ''}
         ${datesTxt ? `<span>🎬 ${datesTxt}</span>` : ''}
       </div>
+      ${(c.fee || c.method) ? `<div class="cinema-meta">
+        ${c.fee ? `<span>💵 대관비: ${esc(c.fee)}</span>` : ''}
+        ${c.method ? `<span>📋 대관방법: ${esc(c.method)}</span>` : ''}
+      </div>` : ''}
       ${c.memo ? `<div class="cinema-meta"><span>📝 ${esc(c.memo)}</span></div>` : ''}
     </div>
     <div class="cinema-tags">
+      ${scaleColor ? `<span class="tag" style="background:${scaleColor};color:${textColorOn(scaleColor)}">${esc(c.scale)}</span>` : ''}
       <span class="tag" style="background:${color};color:${textColorOn(color)}">${c.status}</span>
+      <button class="like-btn ${hasLiked(c) ? 'liked' : ''}" data-act="like" title="추천">❤ <span>${likeCount(c)}</span></button>
       <div class="row-actions">
         <button class="btn btn-sm btn-icon" data-act="edit">편집</button>
         <button class="btn btn-sm btn-icon btn-ghost" data-act="del">🗑</button>
       </div>
     </div>
   </div>`);
+  $('[data-act=like]', item).addEventListener('click', () => toggleLike(c));
   $('[data-act=edit]', item).addEventListener('click', () => openCinemaModal(c));
   $('[data-act=del]', item).addEventListener('click', () => confirmDelete(`'${c.name}'을(를) 삭제할까요?`, () => {
     DB.cinemas = DB.cinemas.filter(x => x.id !== c.id); saveDB(); rerender(); toast('삭제되었습니다');
@@ -991,7 +1076,7 @@ function cinemaItem(c) {
 }
 
 function openCinemaModal(existing) {
-  const c = existing || { name: '', location: '', region: '서울', status: '확인중', dates: [], manager: '', contact: '', memo: '' };
+  const c = existing || { name: '', location: '', region: '서울', status: '확인중', dates: [], manager: '', contact: '', site: '', scale: '', fee: '', method: '', memo: '' };
   let dates = [...(c.dates || [])];
 
   const form = el(`
@@ -1011,6 +1096,10 @@ function openCinemaModal(existing) {
         <div class="pill-select" id="statusPick"></div>
       </div>
       <div class="field">
+        <label>대관 규모</label>
+        <div class="pill-select" id="scalePick"></div>
+      </div>
+      <div class="field">
         <label>상영 날짜 <span style="color:var(--muted);font-weight:400">(복수 선택 가능 · 상영일정 상태 시 캘린더 자동 등록)</span></label>
         <div class="field-row" style="margin:0">
           <div class="field" style="margin:0;flex:1.6"><input type="date" id="cinemaDateInput" min="2026-07-01" max="2026-12-31" /></div>
@@ -1022,10 +1111,14 @@ function openCinemaModal(existing) {
         <div class="field"><label>담당자</label><input type="text" name="manager" placeholder="예) 김도은" value="${esc(c.manager)}" /></div>
         <div class="field"><label>연락처</label><input type="text" name="contact" placeholder="전화번호" value="${esc(c.contact)}" /></div>
       </div>
+      <div class="field"><label>사이트 URL</label><input type="text" name="site" placeholder="예) https://indiespace.kr" value="${esc(c.site)}" /></div>
+      <div class="field"><label>대관비</label><input type="text" name="fee" placeholder="예) 30만원 / 협의 가능" value="${esc(c.fee)}" /></div>
+      <div class="field"><label>대관방법</label><textarea name="method" placeholder="예) 홈페이지 신청 후 담당자 협의">${esc(c.method)}</textarea></div>
       <div class="field"><label>메모</label><textarea name="memo" placeholder="통화 내용, 특이사항">${esc(c.memo)}</textarea></div>
     </form>`);
 
   const getStatus = pillSelect($('#statusPick', form), Object.entries(CINEMA_STATUS), c.status);
+  const getScale = pillSelect($('#scalePick', form), Object.entries(CINEMA_SCALE_LABEL).map(([k, label]) => [label, CINEMA_SCALE[k]]), CINEMA_SCALE_LABEL[c.scale] || '');
 
   const chipsBox = $('#dateChips', form);
   const drawChips = () => {
@@ -1060,12 +1153,16 @@ function openCinemaModal(existing) {
     // 입력창에 남아있는 날짜도 반영
     const pending = $('#cinemaDateInput', form).value;
     if (pending && !dates.includes(pending)) dates.push(pending);
+    // 규모 라벨 → 키('소규모'/'대규모') 역변환
+    const scaleLabel = getScale();
+    const scale = Object.keys(CINEMA_SCALE_LABEL).find(k => CINEMA_SCALE_LABEL[k] === scaleLabel) || '';
     const data = {
-      name, location, region: fd.get('region'), status: getStatus(),
-      dates: [...dates].sort(), manager: fd.get('manager').trim(), contact: fd.get('contact').trim(), memo: fd.get('memo').trim(),
+      name, location, region: fd.get('region'), status: getStatus(), scale,
+      dates: [...dates].sort(), manager: fd.get('manager').trim(), contact: fd.get('contact').trim(),
+      site: fd.get('site').trim(), fee: fd.get('fee').trim(), method: fd.get('method').trim(), memo: fd.get('memo').trim(),
     };
     if (existing) Object.assign(existing, data);
-    else DB.cinemas.push({ id: uid(), ...data });
+    else DB.cinemas.push({ id: uid(), likes: 0, likedBy: [], ...data });
     saveDB(); closeModal(); rerender();
     toast(existing ? '수정되었습니다' : '영화관이 등록되었습니다');
   }));
@@ -1098,8 +1195,8 @@ function renderIdeas() {
   }
 
   const grid = el('<div class="idea-grid"></div>');
-  // 핀 고정 우선 → 좋아요 많은 순
-  [...list].sort((a, b) => (b.pinned - a.pinned) || ((b.likes || 0) - (a.likes || 0))).forEach(i => grid.appendChild(ideaCard(i)));
+  // 하트(좋아요) 많은 순 → 동점이면 고정된 항목 우선
+  [...list].sort((a, b) => (likeCount(b) - likeCount(a)) || (b.pinned - a.pinned)).forEach(i => grid.appendChild(ideaCard(i)));
   view.appendChild(grid);
 }
 
@@ -1115,7 +1212,7 @@ function ideaCard(i) {
       <div class="idea-title">${esc(i.title)}</div>
       ${i.content ? `<div class="idea-content">${esc(i.content)}</div>` : ''}
       <div class="idea-foot">
-        <button class="like-btn ${i.liked ? 'liked' : ''}" data-act="like">❤ <span>${i.likes || 0}</span></button>
+        <button class="like-btn ${hasLiked(i) ? 'liked' : ''}" data-act="like">❤ <span>${likeCount(i)}</span></button>
         <button class="like-btn ${i.pinned ? 'liked' : ''}" data-act="pin" title="상단 고정">📌</button>
         <button class="btn btn-sm btn-icon" data-act="edit">편집</button>
         <button class="btn btn-sm btn-icon btn-ghost" data-act="del">🗑</button>
@@ -1123,11 +1220,7 @@ function ideaCard(i) {
       </div>
     </div>
   </div>`);
-  $('[data-act=like]', card).addEventListener('click', () => {
-    i.liked = !i.liked;
-    i.likes = Math.max(0, (i.likes || 0) + (i.liked ? 1 : -1));
-    saveDB(); rerender();
-  });
+  $('[data-act=like]', card).addEventListener('click', () => toggleLike(i));
   $('[data-act=pin]', card).addEventListener('click', () => {
     i.pinned = !i.pinned;
     saveDB(); rerender(); toast(i.pinned ? '상단에 고정했어요' : '고정을 해제했어요');
@@ -1201,7 +1294,7 @@ function openIdeaModal(existing) {
     if (!title) return toast('제목을 입력해주세요');
     const data = { title, content: form.querySelector('[name=content]').value.trim(), type: getType(), image: imageData, author: getAuthor() };
     if (existing) Object.assign(existing, data);
-    else DB.ideas.push({ id: uid(), likes: 0, liked: false, pinned: false, ...data });
+    else DB.ideas.push({ id: uid(), likes: 0, likedBy: [], pinned: false, ...data });
     saveDB(); closeModal(); rerender(); toast(existing ? '수정되었습니다' : '아이디어가 추가되었습니다');
   }));
 
@@ -1806,8 +1899,9 @@ function eventsRows() {
 }
 function cinemasRows() {
   return DB.cinemas.map(c => ({
-    지역: c.region, 영화관: c.name, 위치: c.location, 상태: c.status,
-    상영일정: (c.dates || []).join(', '), 담당자: c.manager || '', 연락처: c.contact || '', 메모: c.memo || '',
+    지역: c.region, 영화관: c.name, 위치: c.location, 상태: c.status, 대관규모: c.scale || '',
+    상영일정: (c.dates || []).join(', '), 담당자: c.manager || '', 연락처: c.contact || '',
+    '사이트 URL': c.site || '', 대관비: c.fee || '', 대관방법: c.method || '', 추천수: c.likes || 0, 메모: c.memo || '',
   }));
 }
 function ideasRows() {
@@ -1917,7 +2011,6 @@ function dbFromWorkbook(wb) {
     return [];
   };
   const db = structuredClone(DEFAULT_DB);
-  db.seeded = true;
 
   sheet(['캘린더']).forEach(r => {
     const date = normDateCell(r['날짜']);
@@ -2012,7 +2105,7 @@ function handleImportFile(file) {
         if (!parsed || typeof parsed !== 'object' || !('events' in parsed || 'accounting' in parsed)) {
           return toast('빅활동 백업 파일이 아니에요');
         }
-        newDB = migrateDB({ ...structuredClone(DEFAULT_DB), ...parsed, seeded: true });
+        newDB = migrateDB({ ...structuredClone(DEFAULT_DB), ...parsed });
       } else {
         const wb = XLSX.read(reader.result, { type: 'array' });
         newDB = migrateDB(dbFromWorkbook(wb));
