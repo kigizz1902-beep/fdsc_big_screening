@@ -290,6 +290,15 @@ table.data tr:last-child td { border-bottom: none; }
 /* ===== 이번 주 일정 ===== */
 .week-section { margin-top: 20px; }
 .week-section h3 { font-size: 15px; margin-bottom: 10px; display: flex; align-items: center; gap: 8px; }
+
+/* 주간 헤더 (좌우 이동) — 제목·화살표·범위가 모바일에서도 줄바꿈으로 안전하게 배치 */
+.week-header { display: flex; align-items: center; justify-content: space-between; gap: 8px 12px; flex-wrap: wrap; margin-bottom: 10px; }
+.week-header h3 { margin-bottom: 0; }
+.week-nav { display: flex; align-items: center; gap: 6px; }
+.week-nav-btn { padding: 6px 12px; font-size: 16px; line-height: 1; }
+.week-nav-btn:hover { background: var(--bg); }
+.week-nav-btn:focus-visible { outline: 2px solid var(--p5); outline-offset: 2px; }
+.week-range { font-size: 12.5px; color: var(--muted); min-width: 96px; text-align: center; }
 .week-list { display: flex; flex-direction: column; gap: 8px; }
 .week-item {
   display: flex; align-items: center; gap: 12px;

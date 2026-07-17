@@ -4,27 +4,10 @@
    ========================================================= */
 
 /* ---------- 클라우드 설정 (Supabase) ----------
-   아래 두 값을 채우면 모든 기기·팀원이 같은 데이터를 실시간 공유합니다.
-   비워두면 기존처럼 이 브라우저에만 저장됩니다(로컬 모드).
-
-   설정 방법:
-   1. https://supabase.com 무료 가입 → New Project 생성
-   2. 프로젝트 대시보드 → SQL Editor에서 아래 SQL 실행:
-
-      create table if not exists bigact (
-        id text primary key,
-        kind text not null,
-        data jsonb not null,
-        updated_at timestamptz default now()
-      );
-      alter table bigact enable row level security;
-      create policy "team access" on bigact for all using (true) with check (true);
-
-   3. Settings → API 에서 Project URL과 anon public 키를 복사해 아래에 붙여넣기
-   4. 저장 후 Vercel에 다시 배포
+   연결 정보(SUPABASE_URL · SUPABASE_KEY)는 supabase.js 파일에서 관리합니다.
+   supabase.js가 index.html에서 이 파일보다 먼저 로드되어 두 전역 상수를 제공합니다.
+   두 값이 비어 있으면 로컬 모드(이 브라우저에만 저장)로 동작합니다.
 ------------------------------------------------ */
-const SUPABASE_URL = 'https://ytgermhcagfjnoxinvnd.supabase.co';
-const SUPABASE_KEY = 'sb_publishable_65IzteQ16sDtOF1OxmpPbg_XQqUYBTc';
 
 /* ---------- 상수 ---------- */
 const MEMBERS = [
@@ -192,6 +175,20 @@ function migrateDB(db) {
   };
   const rename = (s) => RENAME_MAP[s] || s;
 
+  /* 예시(시드) 일정 영구 제거 — 초기 배포에 견본으로 들어있던 일정이 여러 기기·
+     클라우드에 캐시되어 '삭제해도 계속 되살아나던' 문제를 근본적으로 없앤다.
+     아래 견본과 이름+메모가 일치하는 항목만 지우므로 실제 일정은 안전하며,
+     모든 기기가 로드 시 각자 지우고(재업로드 차단) 클라우드에서도 삭제된다. */
+  const SAMPLE_EVENTS = [
+    { name: '킥오프 미팅', memo: '역할 분담' },
+    { name: '중간점검 워크숍', memo: '진행상황 점검' },
+    { name: '결과물 완료', memo: '결과물 마감' },
+    { name: '활동 회고 및 아카이브', memo: '회고 미팅' },
+  ];
+  db.events = (db.events || []).filter(e =>
+    !SAMPLE_EVENTS.some(s => e.name === s.name && String(e.memo || '').includes(s.memo))
+  );
+
   (db.timestamps || []).forEach(t => { t.name = rename(t.name); });
   (db.ideas || []).forEach(i => {
     i.author = rename(i.author);
@@ -275,10 +272,11 @@ function saveDB() {
    - 항목(이벤트/영화관/…) 하나가 서버의 행 하나 → 팀원 간 동시 편집에도 안전
    - 저장 시 변경분만 업로드, 30초마다 + 화면 복귀 시 서버에서 갱신
    ========================================================= */
-const CLOUD_KINDS = [
-  ['events', 'event'], ['cinemas', 'cinema'], ['ideas', 'idea'],
-  ['accounting', 'acc'], ['timestamps', 'ts'], ['minutes', 'minute'],
-];
+/* 타임시트('ts')·회계('acc')·아이디어('idea')·영화관('cinema')·회의록('minute')은 관계형 테이블로 이관되어
+   bigact 동기화에서 제외한다. (각 js 모듈이 Supabase 테이블을 단독 원본으로 사용 → 중복 저장 방지)
+   캘린더 일반 일정도 calendar_events 테이블로 이관 완료(js/calendar.js) → 동기화 대상 없음.
+   bigact 는 과거 데이터 보존용 읽기 전용 보관함이 됨 — 행을 삭제·수정하지 않는다. */
+const CLOUD_KINDS = [];
 let lastCloud = null;   // 마지막으로 서버와 일치했던 상태 (id → row JSON)
 let pushTimer = null;
 let pulling = false;
@@ -332,7 +330,11 @@ function setSyncStatus(state, msg) {
 async function cloudFetchRows() {
   const res = await fetch(`${SUPABASE_URL}/rest/v1/bigact?select=id,kind,data`, { headers: cloudHeaders() });
   if (!res.ok) throw new Error(`fetch ${res.status}`);
-  return res.json();
+  const rows = await res.json();
+  /* bigact에 남아있는 기존 관계형-이관 종류('ts'·'acc'·'idea'·'cinema') 행은 보존하되 동기화 대상에서 제외한다.
+     (제외하지 않으면 dbToRows에 없어 pushDiff가 서버의 해당 행을 삭제해버림) */
+  const SKIP = new Set(['ts', 'acc', 'idea', 'cinema', 'minute']);
+  return Array.isArray(rows) ? rows.filter(r => !SKIP.has(r.kind)) : rows;
 }
 
 /* 변경 감지용 스탬프 (행 개수 + 최신 수정시각) — 응답이 수백 바이트라 전송량 절약
@@ -369,12 +371,16 @@ async function cloudDelete(ids) {
 
 /* 변경분 업로드 (디바운스) */
 function schedulePush() {
+  if (!CLOUD_KINDS.length) return; // 동기화 대상 없음 — bigact 는 읽기 전용 보관함
   if (!cloudEnabled() || lastCloud === null) return; // 최초 동기화 전이면 보류
   clearTimeout(pushTimer);
   pushTimer = setTimeout(pushDiff, 600);
 }
 
 async function pushDiff() {
+  /* ⚠️ CLOUD_KINDS 가 비면 반드시 중단 — 아래 deletes 계산이 dbToRows 에 없는
+     bigact 의 모든 과거 행(event 등)을 삭제 대상으로 잡아버리기 때문 */
+  if (!CLOUD_KINDS.length) return;
   if (!cloudEnabled() || lastCloud === null) return;
   const rows = dbToRows(DB);
   const cur = rowMap(rows);
@@ -424,7 +430,8 @@ async function pullCloud({ silent } = { silent: true }) {
       DB = nextDb;
       localStorage.setItem(DB_KEY, JSON.stringify(DB));
       lastCloud = serverMap;
-      if (localOnly.length || !rows.some(r => r.id === '__settings__')) await pushDiff();
+      // 견본 삭제 등 로컬↔서버 차이를 항상 반영 (차이 없으면 pushDiff가 알아서 건너뜀)
+      await pushDiff();
       lastStamp = await cloudCheckStamp().catch(() => null);
       setSyncStatus('on', '클라우드 연결됨');
       rerender();
@@ -718,12 +725,12 @@ function renderCalendar() {
   drawMonth();
 }
 
-/* 특정 날짜에 걸리는 회의록 항목 (회의 날짜 / 다음 회의 예정) */
+/* 특정 날짜에 걸리는 회의록 항목 (회의 날짜 / 다음 회의 예정) — 원본 = Supabase(window.minuteRecords) */
 function minuteItemsOnDate(dateStr) {
   const items = [];
-  DB.minutes.forEach(m => {
-    if (m.date === dateStr) items.push({ label: '📝 ' + m.title, color: MINUTE_COLOR, minute: m, kind: '회의' });
-    if (m.nextDate && m.nextDate === dateStr) items.push({ label: '📝 다음 회의: ' + m.title, color: MINUTE_COLOR, minute: m, kind: '다음 회의 예정' });
+  (window.minuteRecords || []).forEach(m => {
+    if (m.date === dateStr) items.push({ label: '📝 ' + m.title, color: MINUTE_COLOR, minuteId: m.id, kind: '회의' });
+    if (m.nextDate && m.nextDate === dateStr) items.push({ label: '📝 다음 회의: ' + m.title, color: MINUTE_COLOR, minuteId: m.id, kind: '다음 회의 예정' });
   });
   return items;
 }
@@ -753,19 +760,18 @@ function buildWeekSection() {
       items.push({ date: showDate, time: e.time || '', label: e.name, sub: e.dateEnd && e.dateEnd !== e.date ? `~ ${fmtDate(e.dateEnd)}` : (e.time || '종일'), color: SECTORS[e.sector] || '#9a8f95', onClick: () => openEventDetail(e) });
     }
   });
-  DB.cinemas.forEach(c => {
-    (c.dates || []).forEach(d => {
-      if (d >= sunStr && d <= satStr && c.status === '상영일정') {
-        items.push({ date: d, time: '', label: `🎬 ${c.name} 상영`, sub: c.location, color: CINEMA_STATUS['상영일정'], onClick: () => openCinemaModal(c) });
-      }
-    });
+  // 영화관 상영 일정 = Supabase (window.cinemaScreenings). 클릭 시 영화관 상세 열기.
+  (window.cinemaScreenings || []).forEach(s => {
+    if (s.date >= sunStr && s.date <= satStr) {
+      items.push({ date: s.date, time: s.startTime ? String(s.startTime).slice(0, 5) : '', label: `🎬 ${s.name} (${s.dateTypeLabel})`, sub: s.region || s.address || '', color: CINEMA_STATUS['상영일정'], onClick: () => window.openCinemaDetail && window.openCinemaDetail(s.cinemaId) });
+    }
   });
-  DB.minutes.forEach(m => {
+  (window.minuteRecords || []).forEach(m => {
     if (m.date >= sunStr && m.date <= satStr) {
-      items.push({ date: m.date, time: '', label: `📝 ${m.title}`, sub: '회의', color: MINUTE_COLOR, onClick: () => openMinuteDetail(m) });
+      items.push({ date: m.date, time: '', label: `📝 ${m.title}`, sub: '회의', color: MINUTE_COLOR, onClick: () => window.openMinuteDetailById && window.openMinuteDetailById(m.id) });
     }
     if (m.nextDate && m.nextDate >= sunStr && m.nextDate <= satStr) {
-      items.push({ date: m.nextDate, time: '', label: `📝 다음 회의: ${m.title}`, sub: '다음 회의 예정', color: MINUTE_COLOR, onClick: () => openMinuteDetail(m) });
+      items.push({ date: m.nextDate, time: '', label: `📝 다음 회의: ${m.title}`, sub: '다음 회의 예정', color: MINUTE_COLOR, onClick: () => window.openMinuteDetailById && window.openMinuteDetailById(m.id) });
     }
   });
   items.sort((a, b) => (a.date + (a.time || '99')).localeCompare(b.date + (b.time || '99')));
@@ -818,11 +824,9 @@ function drawMonth() {
       if (dateStr === today) cell.classList.add('today');
 
       const dayEvents = DB.events.filter(e => eventOnDate(e, dateStr)).sort((a, b) => (a.time || '99').localeCompare(b.time || '99'));
-      const screenings = [];
-      DB.cinemas.forEach(cn => {
-        if (cn.status === '상영일정' && (cn.dates || []).includes(dateStr)) screenings.push(cn);
-      });
-      const dayTs = DB.timestamps.filter(t => t.date === dateStr);
+      // 영화관 상영 일정 = Supabase (window.cinemaScreenings)
+      const screenings = (window.cinemaScreenings || []).filter(s => s.date === dateStr);
+      const dayTs = (window.timesheetRecords || []).filter(t => t.date === dateStr); // 타임시트 원본 = Supabase
 
       const evWrap = el('<div class="cal-events"></div>');
       const combined = [
@@ -834,12 +838,12 @@ function drawMonth() {
         ...minuteItemsOnDate(dateStr).map(it => ({
           label: it.label,
           color: it.color,
-          onClick: () => openMinuteDetail(it.minute), // 캘린더에서 바로 회의록 열람/편집
+          onClick: () => window.openMinuteDetailById && window.openMinuteDetailById(it.minuteId), // 회의록 상세 열기
         })),
-        ...screenings.map(cn => ({
-          label: '🎬 ' + cn.name,
+        ...screenings.map(s => ({
+          label: `🎬 ${s.name} (${s.dateTypeLabel})`,
           color: CINEMA_STATUS['상영일정'],
-          onClick: () => openCinemaModal(cn), // 캘린더에서 바로 편집 → 영화관 리스트에도 반영
+          onClick: () => window.openCinemaDetail && window.openCinemaDetail(s.cinemaId), // 영화관 상세 열기
         })),
       ];
       combined.slice(0, 3).forEach(item => {
@@ -864,17 +868,19 @@ function drawMonth() {
 
 /* 그날의 작업 기록 목록 모달 (캘린더 연동, 편집 가능) */
 function openDayTimestampsModal(dateStr) {
-  const list = DB.timestamps.filter(t => t.date === dateStr);
+  // 타임시트 원본 = Supabase (window.timesheetRecords). 편집·추가도 새 타임시트 모달 사용.
+  const list = (window.timesheetRecords || []).filter(t => t.date === dateStr);
+  const openForm = window.openTimesheetForm || openTsModal; // 폴백(로드 실패 시)
   const body = el('<div></div>');
   body.appendChild(el(`<p class="hint" style="margin-bottom:10px">${fmtDate(dateStr)} (${weekdayKo(dateStr)})의 작업 기록</p>`));
   list.forEach(t => {
-    const col = MEMBER_COLOR[t.name] || '#9a8f95';
+    const col = t.color || MEMBER_COLOR[t.name] || '#9a8f95';
     const row = el(`<div class="detail-row" style="align-items:center">
       <span class="tag" style="background:${col};color:${textColorOn(col)};flex-shrink:0">${esc(t.name)}</span>
       <span class="dv" style="padding-left:10px"><strong>${t.hours}h</strong> · ${esc(t.work)}</span>
       <button class="btn btn-sm btn-icon">편집</button>
     </div>`);
-    row.querySelector('button').addEventListener('click', () => { closeModal(); openTsModal(t); });
+    row.querySelector('button').addEventListener('click', () => { closeModal(); openForm(t); });
     body.appendChild(row);
   });
   openModal({
@@ -882,7 +888,7 @@ function openDayTimestampsModal(dateStr) {
     body,
     footer: [
       mkBtn('닫기', 'btn-ghost', closeModal),
-      mkBtn('+ 기록 추가', 'btn-primary', () => { closeModal(); openTsModal(null, dateStr); }),
+      mkBtn('+ 기록 추가', 'btn-primary', () => { closeModal(); openForm(null, dateStr); }),
     ],
   });
 }
@@ -1893,43 +1899,60 @@ function fileName(menu) { return `빅활동_${menu}_${stampToday()}.xlsx`; }
 function sheetFrom(rows) { return XLSX.utils.json_to_sheet(rows.length ? rows : [{}]); }
 
 function eventsRows() {
-  return [...DB.events].sort((a, b) => (a.date || '').localeCompare(b.date || '')).map(e => ({
-    날짜: e.date, 종료일: e.dateEnd || '', 시간: e.time || '종일', 이벤트명: e.name, 섹터: e.sector, 메모: e.memo || '',
+  // 일반 일정 원본 = Supabase calendar_events (window.calendarEventRecords). DB.events 는 더 이상 사용하지 않음.
+  return [...(window.calendarEventRecords || [])].sort((a, b) => (a.date || '').localeCompare(b.date || '')).map(e => ({
+    유형: e.sector, 제목: e.name, 시작일: e.date, 종료일: e.dateEnd || '', 시간: e.time || '종일', 메모: e.memo || '',
   }));
 }
 function cinemasRows() {
-  return DB.cinemas.map(c => ({
-    지역: c.region, 영화관: c.name, 위치: c.location, 상태: c.status, 대관규모: c.scale || '',
-    상영일정: (c.dates || []).join(', '), 담당자: c.manager || '', 연락처: c.contact || '',
-    '사이트 URL': c.site || '', 대관비: c.fee || '', 대관방법: c.method || '', 추천수: c.likes || 0, 메모: c.memo || '',
+  // 영화관 원본 = Supabase (window.cinemaRecords). DB.cinemas 는 더 이상 사용하지 않음.
+  const label = (s) => ({ researching: '확인중', contacted: '연락완료', available: '대관가능', booked: '대관확정', unavailable: '대관불가' }[s] || s || '');
+  return [...(window.cinemaRecords || [])].map(c => ({
+    지역: c.region || '', 영화관: c.name, 위치: c.address || '', 상태: label(c.status),
+    대관료: c.rentalCost ?? '', 담당자: (c.members || []).map(m => m.name).join(', '),
+    후보일: (c.dates || []).filter(d => d.dateType === 'candidate').map(d => d.date).join(', '),
+    확정일: (c.dates || []).filter(d => d.dateType === 'confirmed').map(d => d.date).join(', '),
+    링크: (c.links || []).map(l => l.url).join(', '), 메모: c.notes || '',
   }));
 }
 function ideasRows() {
-  return DB.ideas.map(i => ({
-    제목: i.title, 유형: i.type, 내용: i.content || '', 작성자: i.author, 좋아요: i.likes || 0,
-    고정: i.pinned ? '예' : '',
-    이미지: i.image && i.image.startsWith('data:') ? '(업로드 이미지)' : (i.image || ''),
+  // 아이디어 원본 = Supabase (window.ideaRecords). DB.ideas 는 더 이상 사용하지 않음.
+  return [...(window.ideaRecords || [])].map(i => ({
+    카테고리: i.category, 내용: i.content || '', '관련 링크': i.linkUrl || '',
+    '작성자/참여자': (i.authors || []).map(a => a.name).join(', '),
+    '댓글 수': (i.comments || []).length,
+    작성일: i.createdAt ? String(i.createdAt).slice(0, 10) : '',
+    수정일: i.updatedAt ? String(i.updatedAt).slice(0, 10) : '',
   }));
 }
 function accountingRows() {
-  return [...DB.accounting].sort((a, b) => (a.date || '').localeCompare(b.date || '')).map(a => ({
-    날짜: a.date, 유형: a.type, 구분: a.group, 항목: a.account, 내용: a.content || '',
-    '인원/수량': Number(a.qty ?? 1), '개월/횟수': Number(a.times ?? 1), 단가: Number(a.unit ?? 0), 금액: Number(a.amount || 0),
+  // 회계 원본 = Supabase (window.accountingEntries). DB.accounting 은 더 이상 사용하지 않음.
+  return [...(window.accountingEntries || [])].sort((a, b) => (a.date || '').localeCompare(b.date || '')).map(a => ({
+    날짜: a.date, 유형: a.typeLabel, 구분: a.category, 항목: a.account, 내용: a.content || '',
+    '인원/수량': Number(a.quantity ?? 1), '개월/횟수': Number(a.occurrenceCount ?? 1), 단가: Number(a.unitPrice ?? 0), 금액: Number(a.amount || 0),
   }));
 }
 function timestampsRows() {
-  return [...DB.timestamps].sort((a, b) => (a.date || '').localeCompare(b.date || '')).map(t => ({
+  // 타임시트 원본 = Supabase (window.timesheetRecords). DB.timestamps 는 더 이상 사용하지 않음.
+  return [...(window.timesheetRecords || [])].sort((a, b) => (a.date || '').localeCompare(b.date || '')).map(t => ({
     날짜: t.date, 이름: t.name, 시간: t.hours, 한일: t.work,
   }));
 }
 function minutesRows() {
-  return [...DB.minutes].sort((a, b) => (a.date || '').localeCompare(b.date || '')).map(m => ({
-    날짜: m.date, 제목: m.title, 참가자: m.participants.join(', '), 게스트: m.guests.join(', '),
+  // 회의록 원본 = Supabase (window.minuteRecords). DB.minutes 는 더 이상 사용하지 않음.
+  return [...(window.minuteRecords || [])].sort((a, b) => (a.date || '').localeCompare(b.date || '')).map(m => ({
+    날짜: m.date, 제목: m.title,
+    참가자: (m.participants || []).map(p => p.name).join(', '), 게스트: (m.guests || []).join(', '),
     회의목적: m.purpose || '', 회의내용: m.content || '', 다음회의안건: m.nextAgenda || '', 다음미팅날짜: m.nextDate || '',
+    작성일: m.createdAt ? String(m.createdAt).slice(0, 10) : '', 수정일: m.updatedAt ? String(m.updatedAt).slice(0, 10) : '',
   }));
 }
 function settingsRows() {
-  return [{ 항목: '총 버짓', 값: Number(DB.budget || 0) }];
+  // 총 버짓 원본 = Supabase accounting_settings (window.accountingSettings). 없으면 레거시 DB.budget.
+  const budget = (window.accountingSettings && window.accountingSettings.loaded)
+    ? Number(window.accountingSettings.totalBudget || 0)
+    : Number(DB.budget || 0);
+  return [{ 항목: '총 버짓', 값: budget }];
 }
 
 function downloadSheet(rows, menu, sheetName) {
@@ -1958,7 +1981,7 @@ function exportTimestamps() {
   const rows = timestampsRows();
   if (!rows.length) return toast('내보낼 데이터가 없어요');
   const totals = {};
-  DB.timestamps.forEach(t => totals[t.name] = (totals[t.name] || 0) + Number(t.hours || 0));
+  (window.timesheetRecords || []).forEach(t => totals[t.name] = (totals[t.name] || 0) + Number(t.hours || 0));
   rows.push({});
   Object.entries(totals).forEach(([n, h]) => rows.push({ 날짜: '합계', 이름: n, 시간: h, 한일: '' }));
   downloadSheet(rows, '타임스탬프', '타임스탬프');
@@ -2119,7 +2142,8 @@ function handleImportFile(file) {
       title: '백업 불러오기',
       body: el(`<div><p style="padding:4px 0;font-size:14.5px;line-height:1.7">백업 파일의 데이터로 <b>현재 데이터를 교체</b>합니다.</p>
         <p class="hint" style="margin-top:6px">${counts}</p>
-        <p class="hint" style="margin-top:6px">진행 전에 현재 데이터를 백업해두면 안전해요.</p></div>`),
+        <p class="hint" style="margin-top:6px">진행 전에 현재 데이터를 백업해두면 안전해요.</p>
+        <p class="hint" style="margin-top:6px;color:var(--p3)">※ 회계·타임시트는 이제 관계형 DB(Supabase)를 원본으로 사용합니다. 백업의 회계·작업기록은 화면에 자동 반영되지 않으며, 이관이 필요하면 sql/migrate_legacy_*.sql 을 사용하세요.</p></div>`),
       footer: [
         mkBtn('취소', 'btn-ghost', closeModal),
         mkBtn('교체하고 불러오기', 'btn-primary', () => {
@@ -2182,6 +2206,17 @@ function init() {
 
   navigate('calendar');
   initCloud();
+  // 타임시트 원본(Supabase) 선로딩 — 캘린더의 날짜별 작업 기록 칩을 위해 한 번 불러온다.
+  // 완료되면 timesheets.js 가 현재 화면(캘린더/타임시트)만 다시 그린다.
+  if (typeof loadTimesheetData === 'function') loadTimesheetData();
+  // 회계 원본(Supabase) 선로딩 — 엑셀 전체 백업(회계·설정 시트)이 언제 열려도 최신값을 쓰도록.
+  if (typeof loadAccountingData === 'function') loadAccountingData();
+  // 아이디어 원본(Supabase) 선로딩 — 엑셀 전체 백업(아이디어 시트) 대비.
+  if (typeof loadIdeasData === 'function') loadIdeasData();
+  // 영화관 원본(Supabase) 선로딩 — 캘린더의 상영 일정 칩 + 엑셀 백업 대비.
+  if (typeof loadCinemaData === 'function') loadCinemaData();
+  // 회의록 원본(Supabase) 선로딩 — 캘린더의 회의/다음회의 칩 + 엑셀 백업 대비.
+  if (typeof loadMinutesData === 'function') loadMinutesData();
 }
 
 document.addEventListener('DOMContentLoaded', init);
